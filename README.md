@@ -1,7 +1,6 @@
 # SivPub Subscriptions
 
 [![Build Subscription](https://github.com/Durgaa17/subsiv/actions/workflows/build-subscription.yml/badge.svg)](https://github.com/Durgaa17/subsiv/actions/workflows/build-subscription.yml)
-[![Last Build](https://img.shields.io/endpoint?url=https://sub.sivpub.eu.cc/last-build.json)](https://sub.sivpub.eu.cc/last-build.json)
 
 Public repository that generates one VLESS subscription file per route/tag. Each subscription contains multiple VLESS configs (one per path). All links share the same strict SNI and Host values (loaded exclusively from GitHub Secrets) while every individual link receives a fresh random UUIDv4. Remarks follow the pattern `sivd1`, `sivd2`, … (label + 1-based path index, reset per subscription file).
 
