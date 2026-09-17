@@ -163,6 +163,29 @@ jobs:
           echo "Done. Contents of public/:"
           ls -la public/
 
+      - name: Write last-build.json
+        if: success()
+        run: |
+          set -euo pipefail
+          BUILD_TIME=$(date -u +"%Y-%m-%d %H:%M UTC")
+          cat > public/last-build.json << EOF
+          {
+            "schemaVersion": 1,
+            "label": "last build",
+            "message": "${BUILD_TIME}",
+            "color": "brightgreen"
+          }
+          EOF
+          # Remove leading spaces that heredoc may introduce
+          python3 -c "
+          import json, pathlib
+          p = pathlib.Path('public/last-build.json')
+          data = json.loads(p.read_text())
+          p.write_text(json.dumps(data, indent=2) + '\n')
+          "
+          echo "Wrote public/last-build.json with time: ${BUILD_TIME}"
+          cat public/last-build.json
+
       - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v3
         with:
@@ -170,4 +193,4 @@ jobs:
           publish_dir: ./public
           publish_branch: gh-pages
           force_orphan: true
-          cname: sub.example.com
+          cname: sub.sivpub.eu.cc
