@@ -2,11 +2,11 @@ name: Build Subscription
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 23 * * *'
   push:
     paths:
       - 'parts/**'
-  schedule:
-    - cron: '*/15 * * * *'
 
 jobs:
   build:
@@ -17,6 +17,74 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Fetch and clean path source
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          curl -fsSL https://bestcf.pages.dev/random-region/MY/50.txt -o /tmp/source.txt
+
+          # Fail if empty or missing trailing newline
+          if [ ! -s /tmp/source.txt ]; then
+            echo "ERROR: downloaded source is empty"
+            exit 1
+          fi
+          if [ "$(tail -c1 /tmp/source.txt | wc -l)" -eq 0 ]; then
+            echo "ERROR: downloaded source does not end with a newline"
+            exit 1
+          fi
+
+          # Clean: strip from first #, trim, drop blanks / lines without :
+          # Write to parts/myip.txt
+          > parts/myip.txt
+          while IFS= read -r line || [ -n "$line" ]; do
+            # Remove from first # onward
+            cleaned=$(echo "$line" | sed 's/#.*//')
+            # Trim whitespace
+            cleaned=$(echo "$cleaned" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            # Skip empty or no colon
+            if [ -z "$cleaned" ] || [[ "$cleaned" != *:* ]]; then
+              continue
+            fi
+            printf '%s\n' "$cleaned" >> parts/myip.txt
+          done < /tmp/source.txt
+
+          count=$(wc -l < parts/myip.txt | tr -d ' ')
+          if [ "$count" -eq 0 ]; then
+            echo "ERROR: zero valid entries after cleaning"
+            exit 1
+          fi
+          echo "Cleaned $count valid entries into parts/myip.txt"
+
+      - name: Swap paths.txt and clear myip.txt
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          if [ ! -s parts/myip.txt ]; then
+            echo "ERROR: parts/myip.txt is empty — aborting swap"
+            exit 1
+          fi
+          cp parts/myip.txt parts/paths.txt
+          : > parts/myip.txt
+          count=$(wc -l < parts/paths.txt | tr -d ' ')
+          echo "Swapped: wrote $count entries to parts/paths.txt and cleared myip.txt"
+
+      - name: Commit updated myip.txt and paths.txt
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add parts/myip.txt parts/paths.txt
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: refresh myip.txt and paths.txt [skip ci]"
+            git push origin "${{ github.ref_name }}"
+            echo "Committed and pushed updated paths"
+          fi
 
       - name: Read static parts
         id: parts
