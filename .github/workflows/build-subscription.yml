@@ -1,0 +1,173 @@
+name: Build Subscription
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'parts/**'
+  schedule:
+    - cron: '*/15 * * * *'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read static parts
+        id: parts
+        run: |
+          set -euo pipefail
+          PROTOCOL=$(tr -d '\r' < parts/protocol.txt | head -n1 | xargs)
+          PORT=$(tr -d '\r' < parts/port.txt | head -n1 | xargs)
+          TYPE=$(tr -d '\r' < parts/type.txt | head -n1 | xargs)
+          SECURITY=$(tr -d '\r' < parts/security.txt | head -n1 | xargs)
+          ENCRYPTION=$(tr -d '\r' < parts/encryption.txt | head -n1 | xargs)
+          FINGERPRINT=$(tr -d '\r' < parts/fingerprint.txt | head -n1 | xargs)
+          LABEL=$(tr -d '\r' < parts/label.txt | head -n1 | xargs)
+
+          echo "PROTOCOL=$PROTOCOL" >> $GITHUB_ENV
+          echo "PORT=$PORT" >> $GITHUB_ENV
+          echo "TYPE=$TYPE" >> $GITHUB_ENV
+          echo "SECURITY=$SECURITY" >> $GITHUB_ENV
+          echo "ENCRYPTION=$ENCRYPTION" >> $GITHUB_ENV
+          echo "FINGERPRINT=$FINGERPRINT" >> $GITHUB_ENV
+          echo "LABEL=$LABEL" >> $GITHUB_ENV
+
+      - name: Load secrets (masked)
+        env:
+          SNI: ${{ secrets.SNI }}
+          HOST: ${{ secrets.HOST }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SNI:-}" ]; then
+            echo "ERROR: Secret SNI is not set"
+            exit 1
+          fi
+          if [ -z "${HOST:-}" ]; then
+            echo "ERROR: Secret HOST is not set"
+            exit 1
+          fi
+          # Mask so they never appear in logs
+          echo "::add-mask::$SNI"
+          echo "::add-mask::$HOST"
+          echo "SNI=$SNI" >> $GITHUB_ENV
+          echo "HOST=$HOST" >> $GITHUB_ENV
+
+      - name: Parse routes and generate subscriptions
+        run: |
+          set -euo pipefail
+          mkdir -p public
+
+          # Collect unique tags
+          declare -A seen_tags
+          routes=()
+
+          while IFS= read -r line || [ -n "$line" ]; do
+            # Normalize CRLF and trim
+            line=$(echo "$line" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            # Skip blank and comments
+            if [ -z "$line" ] || [[ "$line" == \#* ]]; then
+              continue
+            fi
+            # Expect "Tag Address"
+            tag=$(echo "$line" | awk '{print $1}')
+            addr=$(echo "$line" | awk '{print $2}')
+            if [ -z "$tag" ] || [ -z "$addr" ]; then
+              echo "ERROR: Invalid route line: $line"
+              exit 1
+            fi
+            if [ -n "${seen_tags[$tag]+x}" ]; then
+              echo "ERROR: Duplicate tag detected: $tag"
+              exit 1
+            fi
+            seen_tags[$tag]=1
+            routes+=("$tag|$addr")
+          done < parts/routes.txt
+
+          if [ ${#routes[@]} -eq 0 ]; then
+            echo "ERROR: No valid routes found in parts/routes.txt"
+            exit 1
+          fi
+
+          # Collect clean paths
+          paths=()
+          while IFS= read -r line || [ -n "$line" ]; do
+            line=$(echo "$line" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            if [ -z "$line" ] || [[ "$line" == \#* ]]; then
+              continue
+            fi
+            paths+=("$line")
+          done < parts/paths.txt
+
+          if [ ${#paths[@]} -eq 0 ]; then
+            echo "ERROR: No valid paths found in parts/paths.txt"
+            exit 1
+          fi
+
+          echo "Found ${#routes[@]} routes and ${#paths[@]} paths"
+
+          # Optional health check (informational only)
+          echo "Running TCP health checks (3s timeout)..."
+          for p in "${paths[@]}"; do
+            ipport="$p"
+            if timeout 3 bash -c "echo > /dev/tcp/${ipport%:*}/${ipport#*:}" 2>/dev/null; then
+              echo "  OK   $ipport"
+            else
+              echo "  FAIL $ipport (still including)"
+            fi
+          done
+
+          # Generate one subscription per route
+          for entry in "${routes[@]}"; do
+            tag="${entry%%|*}"
+            addr="${entry#*|}"
+            outfile="public/$(echo "$tag" | tr '[:upper:]' '[:lower:]')subs.txt"
+            echo "Building $outfile for tag=$tag addr=$addr"
+
+            links=()
+            idx=1
+            for rawpath in "${paths[@]}"; do
+              # Normalize: ensure leading /
+              if [[ "$rawpath" != /* ]]; then
+                normpath="/$rawpath"
+              else
+                normpath="$rawpath"
+              fi
+
+              # URL-encode the path
+              # Use python for reliable encoding
+              encoded=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$normpath")
+
+              # Fresh UUIDv4
+              uuid=$(python3 -c "import uuid; print(uuid.uuid4())")
+
+              # Build VLESS link
+              # vless://UUID@Address:Port?path=...&security=...&encryption=...&host=HOST&type=...&sni=SNI&fp=...#labelIDX
+              link="vless://${uuid}@${addr}:${PORT}?path=${encoded}&security=${SECURITY}&encryption=${ENCRYPTION}&host=${HOST}&type=${TYPE}&sni=${SNI}&fp=${FINGERPRINT}#${LABEL}${idx}"
+              links+=("$link")
+              idx=$((idx + 1))
+            done
+
+            # Join with newlines and base64 -w0
+            printf "%s\n" "${links[@]}" | base64 -w0 > "$outfile"
+            echo "  Wrote $(wc -c < "$outfile") bytes"
+          done
+
+          # Write CNAME
+          cp CNAME public/CNAME
+          echo "Done. Contents of public/:"
+          ls -la public/
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          publish_branch: gh-pages
+          force_orphan: true
+          cname: sub.example.com
