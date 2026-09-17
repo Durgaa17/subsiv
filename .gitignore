@@ -1,0 +1,13 @@
+# Editor and OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.tmp
+*.log
+
+# Generated (never commit to main)
+public/
